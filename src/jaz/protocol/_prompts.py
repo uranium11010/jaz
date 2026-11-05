@@ -67,7 +67,9 @@ def _render_input_block(
     # nothing downstream reports truncation any more (see `get_user_prompt`).
     # TODO(#553): give the agent a REPL tool to read the omitted portion on demand,
     # so uniform truncation stays ergonomic instead of exempting text from the cap.
-    abbreviated_value, _ = abbreviate_string(description, max_invoke_input_length)
+    abbreviated_value = _abbreviate_chunks(value, description, max_invoke_input_length)
+    if abbreviated_value is None:
+        abbreviated_value, _ = abbreviate_string(description, max_invoke_input_length)
     # `__class__.__name__`, not `type(...).__name__`: identical for ordinary values, but a
     # transparent proxy (wrapt.ObjectProxy and friends) spoofs `__class__` to the wrapped type
     # while `type()` still reports the proxy — so this labels the input with the type the agent
@@ -76,6 +78,25 @@ def _render_input_block(
     return RenderedInput(
         name=key, type=value.__class__.__name__, value=abbreviated_value
     )
+
+
+def _abbreviate_chunks(value: object, description: str, cap: int) -> str | None:
+    """For a list of chunks over the cap: keep whole chunks from the front and say how many were
+    dropped, rather than cutting through one (a cut chunk is no longer byte-identical to where it
+    came from). ``None`` for any other value."""
+    from ..repl._repl_history import Chunk
+
+    if not (isinstance(value, (list, tuple)) and value and all(isinstance(v, Chunk) for v in value)):
+        return None
+    if len(description) <= cap:
+        return description
+    kept, used = [], 0
+    for c in value:
+        if used + len(c) + 1 > cap:
+            break
+        kept.append(c)
+        used += len(c) + 1
+    return "\n".join(kept + [f"[...{len(value) - len(kept)} more chunks omitted...]"])
 
 
 def render_input_section(

@@ -5,7 +5,57 @@ The two live in one module because the prose names the entry's fields and must c
 (``tests/repl/test_repl_history.py`` pins that every field is described).
 """
 
+import re
 from dataclasses import dataclass
+from functools import cached_property
+
+
+class Chunk(str):
+    """A span of text meant to be reused verbatim across contexts: a ``str`` that renders as itself.
+
+    A ``Chunk`` is how a value says "show me exactly as I appeared before". Rendered as an
+    ``invoke`` input, a list or tuple made only of chunks renders as the chunks themselves joined
+    by newlines -- not as a Python ``repr`` with quotes and escapes -- so a chunk taken out of
+    ``__history__`` and handed to a sub-invoke appears in the sub-agent's prompt byte-identical to
+    how it appeared in the parent's. That identity is what lets an LLM backend recognise the span
+    and reuse the KV cache it already computed for it (see ``REPLHistoryEntry.chunks``).
+    """
+
+    __slots__ = ()
+
+
+# A chunk is one top-level tagged block: `<tag ...>` through its matching `</tag>`. Same-name tags
+# nest, text between blocks belongs to none, and an opener with no closer is skipped. One pass over
+# the tags with a stack per tag name pairs openers with closers in linear time; a backtracking
+# `<(tag)...>.*?</\1>` re-scans to the end of the text from every unmatched opener, which is
+# quadratic on tracebacks full of `<module>`.
+_TAG = re.compile(r"<(/?)([A-Za-z_][\w.-]*)(?=[\s>/])[^<>]*?(/?)>")
+
+
+def split_chunks(text: str) -> list[Chunk]:
+    """The top-level ``<tag ...>...</tag>`` blocks of ``text``, in order, each as a :class:`Chunk`.
+
+    Closing tags must match the opener's name exactly (``</tag>``). Self-closing tags and openers
+    with no closer are skipped. A ``<tag>`` nested inside a ``<tag>`` is part of the outer chunk.
+    """
+    tags = [(m.start(), m.end(), m.group(2), bool(m.group(1))) for m in _TAG.finditer(text) if not m.group(3)]
+    close_of: dict[int, int] = {}
+    stacks: dict[str, list[int]] = {}
+    for i, (_, _, name, closing) in enumerate(tags):
+        if not closing:
+            stacks.setdefault(name, []).append(i)
+        elif stacks.get(name):
+            close_of[stacks[name].pop()] = i
+    out: list[Chunk] = []
+    i = 0
+    while i < len(tags):
+        j = close_of.get(i)
+        if j is None:
+            i += 1
+            continue
+        out.append(Chunk(text[tags[i][0] : tags[j][1]]))
+        i = j + 1
+    return out
 
 
 @dataclass(frozen=True)
@@ -111,6 +161,15 @@ class REPLHistoryEntry:
     # ``f"{type(e).__name__}: {e}"``.
     repl_exception: BaseException | None
 
+    @cached_property
+    def chunks(self) -> list[Chunk]:
+        """The top-level ``<tag ...>...</tag>`` blocks of ``repl_output``, each a :class:`Chunk`.
+
+        Parsed from the full ``repl_output``. If the observation shown to the agent was abbreviated
+        (``max_repl_output_length``), chunks from the omitted middle were never in its prompt.
+        """
+        return split_chunks(self.repl_output)
+
 
 # The ``__history__`` description `PythonREPL.repl_history_description` returns, beside the entry
 # whose fields it names so the two are edited together. It is not in
@@ -153,4 +212,6 @@ iteration and `__history__[-1]` the most recent). Each entry has:
 - `.repl_output (str)`: The printed output from that iteration, including any error traceback
 - `.repl_exception (BaseException | None)`: The exception object raised if that iteration hit
   a recoverable error, else None
+- `.chunks (list[Chunk])`: The top-level `<tag ...>...</tag>` blocks of `.repl_output`, in order.
+  A list of chunks passed to `invoke()` is shown to the sub-agent verbatim, one chunk per line.
 """
