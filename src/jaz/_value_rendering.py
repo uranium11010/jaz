@@ -42,7 +42,6 @@ else:
 # understated wording).
 
 
-
 def render_value(value: object, bound_name: str | None = None) -> str:
     """Render ``value`` as the text an agent's prompt shows for it.
 
@@ -106,13 +105,15 @@ def render_value(value: object, bound_name: str | None = None) -> str:
     # or how to get it, in 15 of the 19 cases. A value that wants its `__str__` rendered
     # should not be callable: AppWorld's `apis` root prompted this, is never called itself,
     # and drops `__call__` in jaz-lang/jaz-evals-internal#332.
-    # A sequence made only of chunks renders as the chunks themselves, verbatim, one per line --
-    # never as a `repr`. Quoting and escaping would change the bytes, and byte identity with the
-    # chunk's earlier appearance is the point of a `Chunk` (see `jaz.repl.Chunk`).
-    from .repl._repl_history import Chunk  # lazy: no dependency on `jaz.repl` import order
+    # A chunk, or a sequence (nested to any depth) made only of chunks, renders as the chunks
+    # themselves, verbatim, one per line -- never as a `repr`. Quoting and escaping would change
+    # the bytes, and byte identity with the chunk's earlier appearance is the point of a `Chunk`
+    # (see `jaz.repl.Chunk`).
+    from .repl._repl_history import chunk_items  # lazy: no dependency on `jaz.repl` import order
 
-    if isinstance(value, (list, tuple)) and value and all(isinstance(item, Chunk) for item in value):
-        return "\n".join(value)
+    chunks = chunk_items(value)
+    if chunks is not None:
+        return "\n".join(chunks)
     if isinstance(value, type):
         return _format_class(bound_name, value)
     if callable(value):

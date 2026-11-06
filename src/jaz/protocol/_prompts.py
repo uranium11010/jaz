@@ -81,22 +81,27 @@ def _render_input_block(
 
 
 def _abbreviate_chunks(value: object, description: str, cap: int) -> str | None:
-    """For a list of chunks over the cap: keep whole chunks from the front and say how many were
-    dropped, rather than cutting through one (a cut chunk is no longer byte-identical to where it
-    came from). ``None`` for any other value."""
-    from ..repl._repl_history import Chunk
+    """For chunks over the cap: keep whole chunks from the front and say how many were dropped,
+    rather than cutting through one (a cut chunk is no longer byte-identical to where it came
+    from). ``None`` for any other value, and when not even the first chunk fits -- then the caller
+    cuts the text as usual, since nothing of it can stay byte-identical anyway."""
+    from ..repl._repl_history import chunk_items
 
-    if not (isinstance(value, (list, tuple)) and value and all(isinstance(v, Chunk) for v in value)):
+    chunks = chunk_items(value)
+    if chunks is None:
         return None
     if len(description) <= cap:
         return description
     kept, used = [], 0
-    for c in value:
+    for c in chunks:
         if used + len(c) + 1 > cap:
             break
         kept.append(c)
         used += len(c) + 1
-    return "\n".join(kept + [f"[...{len(value) - len(kept)} more chunks omitted...]"])
+    if not kept:
+        return None
+    n = len(chunks) - len(kept)
+    return "\n".join(kept + [f"[...{n} more chunk{'s' if n != 1 else ''} omitted...]"])
 
 
 def render_input_section(

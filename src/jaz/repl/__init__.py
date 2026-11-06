@@ -43,7 +43,7 @@
 # regardless of this comment's position. Membership of ``__all__`` is the contract, not position.
 from ._base import BaseREPL
 from ._python_repl import PythonREPL, PythonREPLState, TracebackVerbosity
-from ._repl_history import Chunk, REPLHistoryEntry, split_chunks
+from ._repl_history import Chunk, REPLHistoryEntry, chunk_items, split_chunks
 from ._types import Continue, ExecResult, Raise, Return, TerminalExecResult
 
 __all__ = [
@@ -58,6 +58,7 @@ __all__ = [
     # and what a sub-agent's `return __history__` hands its parent — so a caller can name what
     # they are handed.
     "Chunk",
+    "chunk_items",
     "REPLHistoryEntry",
     "split_chunks",
     # REPL execution-result taxonomy (hook `event.exec_result`; effect payloads).

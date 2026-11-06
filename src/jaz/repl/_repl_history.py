@@ -14,11 +14,16 @@ class Chunk(str):
     """A span of text meant to be reused verbatim across contexts: a ``str`` that renders as itself.
 
     A ``Chunk`` is how a value says "show me exactly as I appeared before". Rendered as an
-    ``invoke`` input, a list or tuple made only of chunks renders as the chunks themselves joined
-    by newlines -- not as a Python ``repr`` with quotes and escapes -- so a chunk taken out of
-    ``__history__`` and handed to a sub-invoke appears in the sub-agent's prompt byte-identical to
-    how it appeared in the parent's. That identity is what lets an LLM backend recognise the span
-    and reuse the KV cache it already computed for it (see ``REPLHistoryEntry.chunks``).
+    ``invoke`` input, a chunk, or a list or tuple (nested to any depth) made only of chunks, renders
+    as the chunks themselves joined by newlines -- not as a Python ``repr`` with quotes and escapes
+    -- so a chunk taken out of ``__history__`` and handed to a sub-invoke appears in the sub-agent's
+    prompt byte-identical to how it appeared in the parent's. That identity is what lets an LLM
+    backend recognise the span and reuse the KV cache it already computed for it (see
+    ``REPLHistoryEntry.chunks``).
+
+    Caveats: a sequence that mixes chunks with other values renders as a ``repr``, as before; and
+    any ``str`` operation (slicing, ``strip``, ``+``, an f-string) returns a plain ``str``, not a
+    ``Chunk``.
     """
 
     __slots__ = ()
@@ -29,16 +34,51 @@ class Chunk(str):
 # the tags with a stack per tag name pairs openers with closers in linear time; a backtracking
 # `<(tag)...>.*?</\1>` re-scans to the end of the text from every unmatched opener, which is
 # quadratic on tracebacks full of `<module>`.
-_TAG = re.compile(r"<(/?)([A-Za-z_][\w.-]*)(?=[\s>/])[^<>]*?(/?)>")
+_TAG = re.compile(r"<(/?)([A-Za-z_][\w.:-]*)(?=[\s>/])([^<>]*)>")
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
+
+
+def _self_closing(attrs: str) -> bool:
+    # `<br/>`, `<br />` and `<a x="1"/>` close themselves; in `<a href=x/>` the `/` ends an
+    # unquoted attribute value, so the tag is an opener.
+    return attrs.endswith("/") and (len(attrs) == 1 or attrs[-2].isspace() or attrs[-2] in "\"'")
+
+
+def chunk_items(value: object) -> list[Chunk] | None:
+    """The chunks ``value`` renders as, flattened, if it is a :class:`Chunk` or a non-empty list or
+    tuple (nested to any depth) made only of chunks; ``None`` for anything else."""
+    if isinstance(value, Chunk):
+        return [value]
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    out: list[Chunk] = []
+    for item in value:
+        sub = chunk_items(item)
+        if sub is None:
+            return None
+        out.extend(sub)
+    return out
 
 
 def split_chunks(text: str) -> list[Chunk]:
     """The top-level ``<tag ...>...</tag>`` blocks of ``text``, in order, each as a :class:`Chunk`.
 
-    Closing tags must match the opener's name exactly (``</tag>``). Self-closing tags and openers
-    with no closer are skipped. A ``<tag>`` nested inside a ``<tag>`` is part of the outer chunk.
+    Closing tags must match the opener's name exactly (``</tag>``). Self-closing tags, openers with
+    no closer, and tags inside ``<!-- ... -->`` comments are skipped. A ``<tag>`` nested inside a
+    ``<tag>`` is part of the outer chunk. Not an HTML parser: an attribute value containing ``<``
+    or ``>`` hides its tag.
     """
-    tags = [(m.start(), m.end(), m.group(2), bool(m.group(1))) for m in _TAG.finditer(text) if not m.group(3)]
+    comments = [m.span() for m in _COMMENT.finditer(text)]
+    tags, k = [], 0
+    for m in _TAG.finditer(text):
+        while k < len(comments) and comments[k][1] <= m.start():
+            k += 1
+        if k < len(comments) and comments[k][0] <= m.start():
+            continue  # inside a comment
+        closing = bool(m.group(1))
+        if not closing and _self_closing(m.group(3)):
+            continue
+        tags.append((m.start(), m.end(), m.group(2), closing))
     close_of: dict[int, int] = {}
     stacks: dict[str, list[int]] = {}
     for i, (_, _, name, closing) in enumerate(tags):
@@ -166,7 +206,9 @@ class REPLHistoryEntry:
         """The top-level ``<tag ...>...</tag>`` blocks of ``repl_output``, each a :class:`Chunk`.
 
         Parsed from the full ``repl_output``. If the observation shown to the agent was abbreviated
-        (``max_repl_output_length``), chunks from the omitted middle were never in its prompt.
+        (``max_repl_output_length``), chunks from the omitted middle were never in its prompt, and
+        a chunk that straddles the cut was shown only in part; either way it is not byte-identical
+        to anything the agent saw.
         """
         return split_chunks(self.repl_output)
 
@@ -213,5 +255,6 @@ iteration and `__history__[-1]` the most recent). Each entry has:
 - `.repl_exception (BaseException | None)`: The exception object raised if that iteration hit
   a recoverable error, else None
 - `.chunks (list[Chunk])`: The top-level `<tag ...>...</tag>` blocks of `.repl_output`, in order.
-  A list of chunks passed to `invoke()` is shown to the sub-agent verbatim, one chunk per line.
+  A chunk, or a list (or list of lists) containing only chunks, passed to `invoke()` is shown to the
+  sub-agent verbatim, one chunk per line.
 """
